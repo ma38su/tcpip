@@ -103,6 +103,7 @@ impl TCPPacket {
         u32::from_be_bytes(self.buffer[4..8].try_into().unwrap())
     }
 
+    // next seq to be received
     fn get_ack(&self) -> u32 {
         u32::from_be_bytes(self.buffer[8..12].try_into().unwrap())
     }

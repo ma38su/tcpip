@@ -206,10 +206,14 @@ impl Debug for TCPPacket {
         write!(f, r"
         src: {}
         dst: {}
+        seq: {}
+        ack: {}
         flag: {}
         payload_len: {}",
             self.get_src(),
             self.get_dst(),
+            self.get_seq(),
+            self.get_ack(),
             flag_to_string(self.get_flag()),
             self.payload().len()
         )
@@ -393,6 +397,8 @@ impl TCP {
                 continue;
             }
 
+            dbg!("recv", &socket.status, &packet);
+
             if let Err(error) = match socket.status {
                 TcpStatus::SynSent => self.synsent_handler(socket, &packet),
                 _ => {
@@ -408,9 +414,10 @@ impl TCP {
     pub fn synsent_handler(&self, socket: &mut Socket, packet: &TCPPacket) -> Result<()> {
         dbg!("synsent handler");
         if (packet.get_flag() & ACK) == ACK
-            && socket.send_param.unacked_seq <= packet.get_ack()
-            && packet.get_ack() <= socket.send_param.next_seq
-            && (packet.get_flag() & SYN) == SYN {
+                && socket.send_param.unacked_seq <= packet.get_ack()
+                && packet.get_ack() <= socket.send_param.next_seq
+                && (packet.get_flag() & SYN) == SYN {
+
             socket.recv_param.next_seq = packet.get_seq() + 1;
             socket.recv_param.initial_seq = packet.get_seq();
             socket.send_param.unacked_seq = packet.get_ack();

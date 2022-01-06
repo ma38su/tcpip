@@ -122,12 +122,13 @@ impl Socket {
             &self.remote_addr(),
             IpNextHeaderProtocols::Tcp,
         ));
+
         let sent_size = self.sender.send_to(
             tcp_packet.clone(),
             IpAddr::V4(self.remote_addr()),
         ).context(format!("failed to send: \n{:?}", tcp_packet))?;
 
-        dbg!("sent", &tcp_packet);
+        dbg!("sent", &self.status, &tcp_packet);
         Ok(sent_size)
     }
 }

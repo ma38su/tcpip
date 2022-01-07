@@ -1,7 +1,7 @@
 
 use std::fmt::{Debug, Display};
 use std::process::Command;
-use std::sync::{Mutex, Condvar, RwLock, Arc};
+use std::sync::{Mutex, Condvar, RwLock, Arc, RwLockWriteGuard};
 use std::{collections::HashMap};
 use std::net::{Ipv4Addr, IpAddr};
 
@@ -325,6 +325,34 @@ impl TCP {
         Ok(addrs)
     }
 
+    pub fn listen(&self, local_addr: Ipv4Addr, local_port: u16) -> Result<AddressPair> {
+        let addrs = AddressPair::new(
+            local_addr,
+            local_port,
+            UNDETERMINED_ADDR,
+            UNDETERMINED_PORT,
+        );
+        let socket = Socket::new(
+            addrs,
+            TcpStatus::Listen,
+        )?;
+        let mut table = self.sockets.write().unwrap();
+        table.insert(addrs, socket);
+        Ok(addrs)
+    }
+
+    pub fn accept(&self, addrs: AddressPair) -> Result<AddressPair> {
+        self.wait_event(addrs, TCPEventKind::ConnectionCompleted);
+
+        let mut table = self.sockets.write().unwrap();
+        Ok(table
+            .get_mut(&addrs)
+            .context(format!("no such socket: {:?}", addrs))?
+            .connected_queue
+            .pop_front()
+            .context("no connected socket")?)
+    }
+
     fn wait_event(&self, addrs: AddressPair, kind: TCPEventKind) {
         let (lock, cvar) = &self.event_condvar;
         let mut event = lock.lock().unwrap();
@@ -374,22 +402,26 @@ impl TCP {
             };
 
             let mut table = self.sockets.write().unwrap();
-            let socket= match table.get_mut(&AddressPair::new(
+            let mut addrs = AddressPair::new(
                 local_addr,
                 packet.get_dst(),
                 remote_addr,
                 packet.get_src(),
-            )) {
+            );
+            let socket= match table.get_mut(&addrs) {
                 Some(socket) => socket,
-                None => match table.get_mut(&AddressPair::new(
+                None => {
+                    addrs = AddressPair::new(
                         local_addr,
                         packet.get_dst(),
                         UNDETERMINED_ADDR,
                         UNDETERMINED_PORT,
-                    )) {
+                    );
+                    match table.get_mut(&addrs) {
                         Some(socket) => socket,
                         None => continue,
-                    },
+                    }
+                },
             };
 
             // TODO check checksum
@@ -401,6 +433,8 @@ impl TCP {
             dbg!("recv", &socket.status, &packet);
 
             if let Err(error) = match socket.status {
+                TcpStatus::Listen => self.listen_handler(table, addrs, &packet, remote_addr),
+                TcpStatus::SynRecv => self.synrecv_handler(table, addrs, &packet),
                 TcpStatus::SynSent => self.synsent_handler(socket, &packet),
                 _ => {
                     dbg!("not implemented state");
@@ -410,6 +444,76 @@ impl TCP {
                 dbg!(error);
             }
         }
+    }
+
+    pub fn listen_handler(
+        &self,
+        mut table: RwLockWriteGuard<HashMap<AddressPair, Socket>>,
+        listening_addrs: AddressPair,
+        packet: &TCPPacket,
+        remote_addr: Ipv4Addr,
+    ) -> Result<()> {
+        dbg!("listen handler");
+
+        if (packet.get_flag() & ACK) == ACK {
+            // TODO send RST
+            return Ok(());
+        }
+        let listening_socket = table.get_mut(&listening_addrs).unwrap();
+        if (packet.get_flag() & SYN) == SYN {
+            let addrs = AddressPair::new(
+                listening_socket.local_addr(),
+                listening_socket.local_port(),
+                remote_addr,
+                packet.get_src(),
+            );
+            let mut socket = Socket::new(
+                addrs,
+                TcpStatus::SynRecv,
+            )?;
+            socket.recv_param.next_seq = packet.get_seq() + 1;
+            socket.recv_param.initial_seq = packet.get_seq();
+            socket.send_param.initial_seq = rand::thread_rng().gen_range(1..(1<<31));
+            socket.send_param.window_size = packet.get_window_size();
+            socket.send_tcp_packet(
+                socket.send_param.initial_seq,
+                socket.recv_param.next_seq,
+                SYN | ACK,
+                &[],
+            )?;
+            socket.send_param.next_seq = socket.send_param.initial_seq + 1;
+            socket.send_param.unacked_seq = socket.send_param.initial_seq;
+            socket.listening_socket = Some(listening_addrs);
+            dbg!("status: listen ->", &socket.status);
+            table.insert(addrs, socket);
+        }
+        Ok(())
+    }
+
+    pub fn synrecv_handler(
+            &self,
+            mut table: RwLockWriteGuard<HashMap<AddressPair, Socket>>,
+            addrs: AddressPair,
+            packet: &TCPPacket,
+    ) -> Result<()> {
+        dbg!("synrecv handler");
+
+        let socket = table.get_mut(&addrs).unwrap();
+        if (packet.get_flag() & ACK) == ACK 
+            && socket.send_param.unacked_seq <= packet.get_ack()
+            && packet.get_ack() <= socket.send_param.next_seq
+        {
+            socket.recv_param.next_seq = packet.get_seq();
+            socket.send_param.unacked_seq = packet.get_ack();
+            socket.status = TcpStatus::Established;
+            dbg!("status: synrcvd ->", &socket.status);
+            if let Some(id) = socket.listening_socket {
+                let ls = table.get_mut(&id).unwrap();
+                ls.connected_queue.push_back(addrs);
+                self.publish_event(id, TCPEventKind::ConnectionCompleted);
+            }
+        }
+        Ok(())
     }
 
     pub fn synsent_handler(&self, socket: &mut Socket, packet: &TCPPacket) -> Result<()> {

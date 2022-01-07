@@ -1,5 +1,5 @@
-use std::net::{Ipv4Addr, IpAddr};
-use std::ops::Range;
+use std::collections::VecDeque;
+use std::{ops::Range, net::{Ipv4Addr, IpAddr}};
 use anyhow::{Result,Context};
 use pnet::packet::{util, Packet};
 use pnet::{transport::{TransportSender, TransportChannelType, TransportProtocol, self}, packet::ip::IpNextHeaderProtocols};
@@ -59,6 +59,8 @@ pub struct Socket {
     pub send_param: SendParam,
     pub recv_param: RecvParam,
     pub status: TcpStatus,
+    pub connected_queue: VecDeque<AddressPair>,
+    pub listening_socket: Option<AddressPair>,
     pub sender: TransportSender,
 }
 
@@ -84,6 +86,8 @@ impl Socket {
                 tail: 0,
             },
             status,
+            connected_queue: VecDeque::new(),
+            listening_socket: None,
             sender,
         })
     }

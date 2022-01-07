@@ -259,35 +259,6 @@ impl TCP {
         tcp
     }
 
-    fn select_source_addr(&self, addr: Ipv4Addr) -> Result<Ipv4Addr> {
-        let output = Command::new("sh")
-            .arg("-c")
-            .arg(format!("ip route get {} | grep src", addr))
-            .output()?;
-        let tmp = String::from_utf8(output.stdout).unwrap();
-        let mut output = tmp.trim().split_ascii_whitespace();
-        while let Some(s) = output.next() {
-            if s == "src" {
-                break;
-            }
-        }
-
-        let ip = output.next().context("failed to get src ip")?;
-        dbg!("source addr", ip);
-        ip.parse().context("failed to parse source ip")
-    }
-
-    fn select_unused_port(&self, rng: &mut ThreadRng) -> Result<u16> {
-        for _ in 0..(PORT_RANGE.end - PORT_RANGE.start) {
-            let local_port = rng.gen_range(PORT_RANGE);
-            let table = self.sockets.read().unwrap();
-            if table.keys().all(|k| local_port != k.local_port()) {
-                return Ok(local_port);
-            }
-        }
-        anyhow::bail!("no available port found.");
-    }
-
     pub fn connect(&self, addr: Ipv4Addr, port: u16) -> Result<AddressPair> {
         let mut rng = rand::thread_rng();
         let local_addr = self.select_source_addr(addr).unwrap();
@@ -325,6 +296,33 @@ impl TCP {
         Ok(addrs)
     }
 
+    pub fn close(&self, addrs: AddressPair) -> Result<()> {
+        let mut table = self.sockets.write().unwrap();
+        let socket = table
+            .get_mut(&addrs)
+            .context(format!("no such socket: {:?}", addrs))?;
+        socket.send_tcp_packet(
+            socket.send_param.next_seq,
+            socket.recv_param.next_seq,
+            FIN | ACK,
+            &[],
+        )?;
+        socket.send_param.next_seq += 1;
+        match socket.status {
+            TcpStatus::Established => {
+
+            },
+            TcpStatus::CloseWait => {
+
+            },
+            TcpStatus::Listen => {
+                table.remove(&addrs);
+            },
+            _ => {},
+        }
+        Ok(())
+    }
+
     pub fn listen(&self, local_addr: Ipv4Addr, local_port: u16) -> Result<AddressPair> {
         let addrs = AddressPair::new(
             local_addr,
@@ -351,28 +349,6 @@ impl TCP {
             .connected_queue
             .pop_front()
             .context("no connected socket")?)
-    }
-
-    fn wait_event(&self, addrs: AddressPair, kind: TCPEventKind) {
-        let (lock, cvar) = &self.event_condvar;
-        let mut event = lock.lock().unwrap();
-        loop {
-            if let Some(ref e) = *event {
-                if e.addrs == addrs && e.kind == kind {
-                    break;
-                }
-            }
-            event = cvar.wait(event).unwrap();
-        }
-        dbg!(&event);
-        *event = None;
-    }
-
-    fn publish_event(&self, addrs: AddressPair, kind: TCPEventKind) {
-        let (lock, cvar) = &self.event_condvar;
-        let mut e = lock.lock().unwrap();
-        *e = Some(TCPEvent::new(addrs, kind));
-        cvar.notify_all();
     }
 
     pub fn receive_handler(&self) -> Result<()> {
@@ -549,5 +525,56 @@ impl TCP {
             }
         }
         Ok(())
+    }
+
+    fn select_source_addr(&self, addr: Ipv4Addr) -> Result<Ipv4Addr> {
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(format!("ip route get {} | grep src", addr))
+            .output()?;
+        let tmp = String::from_utf8(output.stdout).unwrap();
+        let mut output = tmp.trim().split_ascii_whitespace();
+        while let Some(s) = output.next() {
+            if s == "src" {
+                break;
+            }
+        }
+
+        let ip = output.next().context("failed to get src ip")?;
+        dbg!("source addr", ip);
+        ip.parse().context("failed to parse source ip")
+    }
+
+    fn select_unused_port(&self, rng: &mut ThreadRng) -> Result<u16> {
+        for _ in 0..(PORT_RANGE.end - PORT_RANGE.start) {
+            let local_port = rng.gen_range(PORT_RANGE);
+            let table = self.sockets.read().unwrap();
+            if table.keys().all(|k| local_port != k.local_port()) {
+                return Ok(local_port);
+            }
+        }
+        anyhow::bail!("no available port found.");
+    }
+
+    fn wait_event(&self, addrs: AddressPair, kind: TCPEventKind) {
+        let (lock, cvar) = &self.event_condvar;
+        let mut event = lock.lock().unwrap();
+        loop {
+            if let Some(ref e) = *event {
+                if e.addrs == addrs && e.kind == kind {
+                    break;
+                }
+            }
+            event = cvar.wait(event).unwrap();
+        }
+        dbg!(&event);
+        *event = None;
+    }
+
+    fn publish_event(&self, addrs: AddressPair, kind: TCPEventKind) {
+        let (lock, cvar) = &self.event_condvar;
+        let mut e = lock.lock().unwrap();
+        *e = Some(TCPEvent::new(addrs, kind));
+        cvar.notify_all();
     }
 }

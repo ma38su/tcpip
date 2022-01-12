@@ -1,5 +1,6 @@
 
 use std::fmt::{Debug, Display};
+use std::cmp;
 use std::process::Command;
 use std::sync::{Mutex, Condvar, RwLock, Arc, RwLockWriteGuard};
 use std::{collections::HashMap};
@@ -15,6 +16,7 @@ use rand::prelude::ThreadRng;
 
 use crate::socket::{Socket, AddressPair, PORT_RANGE};
 
+const MSS: usize = 1460;
 const UNDETERMINED_ADDR: Ipv4Addr = Ipv4Addr::new(0,0,0,0);
 const UNDETERMINED_PORT: u16 = 0;
 
@@ -351,6 +353,26 @@ impl TCP {
             .context("no connected socket")?)
     }
 
+    pub fn send(&self, addrs: AddressPair, buffer: &[u8]) -> Result<()> {
+        let mut cursor = 0;
+        while cursor < buffer.len() {
+            let mut table = self.sockets.write().unwrap();
+            let mut socket = table
+                .get_mut(&addrs)
+                .context(format!("no such socket: {:?}", addrs))?;
+            let send_size = cmp::min(MSS, buffer.len() - cursor);
+            socket.send_tcp_packet(
+                socket.send_param.next_seq,
+                socket.recv_param.next_seq,
+                ACK,
+                &buffer[cursor..cursor + send_size],
+            )?;
+            cursor += send_size;
+            socket.send_param.next_seq += send_size as u32;
+        }
+        Ok(())
+    }
+
     pub fn receive_handler(&self) -> Result<()> {
         dbg!("begin recv thread");
         let (_, mut receiver) = transport::transport_channel(
@@ -422,7 +444,7 @@ impl TCP {
         }
     }
 
-    pub fn listen_handler(
+    fn listen_handler(
         &self,
         mut table: RwLockWriteGuard<HashMap<AddressPair, Socket>>,
         listening_addrs: AddressPair,
@@ -466,7 +488,7 @@ impl TCP {
         Ok(())
     }
 
-    pub fn synrecv_handler(
+    fn synrecv_handler(
             &self,
             mut table: RwLockWriteGuard<HashMap<AddressPair, Socket>>,
             addrs: AddressPair,
@@ -492,7 +514,7 @@ impl TCP {
         Ok(())
     }
 
-    pub fn synsent_handler(&self, socket: &mut Socket, packet: &TCPPacket) -> Result<()> {
+    fn synsent_handler(&self, socket: &mut Socket, packet: &TCPPacket) -> Result<()> {
         dbg!("synsent handler");
         if (packet.get_flag() & ACK) == ACK
                 && socket.send_param.unacked_seq <= packet.get_ack()

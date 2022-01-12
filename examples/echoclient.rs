@@ -1,4 +1,4 @@
-use std::net::Ipv4Addr;
+use std::{net::Ipv4Addr, io};
 
 use anyhow::Result;
 use clap::{App, Arg};
@@ -22,6 +22,10 @@ fn main() -> Result<()> {
 
 fn echo_client(remote_addr: Ipv4Addr, remote_port: u16) -> Result<()> {
     let tcp = TCP::new();
-    tcp.connect(remote_addr, remote_port)?;
-    Ok(())
+    let addrs = tcp.connect(remote_addr, remote_port)?;
+    loop {
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        tcp.send(addrs, input.as_bytes())?;
+    }
 }

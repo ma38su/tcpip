@@ -1,8 +1,9 @@
 
 use std::fmt::{Debug, Display};
-use std::cmp;
+use std::{cmp, thread};
 use std::process::Command;
 use std::sync::{Mutex, Condvar, RwLock, Arc, RwLockWriteGuard};
+use std::time::{Duration, SystemTime};
 use std::{collections::HashMap};
 use std::net::{Ipv4Addr, IpAddr};
 
@@ -19,6 +20,7 @@ use crate::socket::{Socket, AddressPair, PORT_RANGE};
 const MSS: usize = 1460;
 const UNDETERMINED_ADDR: Ipv4Addr = Ipv4Addr::new(0,0,0,0);
 const UNDETERMINED_PORT: u16 = 0;
+const RETRANSMISSION_TIMEOUT: u64 = 3;
 
 pub const TCP_HEADER_SIZE: usize = 20;
 
@@ -101,16 +103,16 @@ impl TCPPacket {
         u16::from_be_bytes(self.buffer[2..4].try_into().unwrap())
     }
 
-    fn get_seq(&self) -> u32 {
+    pub fn get_seq(&self) -> u32 {
         u32::from_be_bytes(self.buffer[4..8].try_into().unwrap())
     }
 
     // next seq to be received
-    fn get_ack(&self) -> u32 {
+    pub fn get_ack(&self) -> u32 {
         u32::from_be_bytes(self.buffer[8..12].try_into().unwrap())
     }
 
-    fn get_flag(&self) -> u8 {
+    pub fn get_flag(&self) -> u8 {
         self.buffer[13]
     }
 
@@ -258,7 +260,41 @@ impl TCP {
         std::thread::spawn(move || {
             cloned_tcp.receive_handler().unwrap();
         });
+        let cloned_tcp = tcp.clone();
+        std::thread::spawn(move || {
+            cloned_tcp.timer();
+        });
         tcp
+    }
+
+    fn timer(&self) {
+        dbg!("begin timer thread");
+        loop {
+            let mut table = self.sockets.write().unwrap();
+            for (_, socket) in table.iter_mut() {
+                while let Some(mut item) = socket.retransmission_queue.pop_front() {
+                    if socket.send_param.unacked_seq >item.packet.get_seq() {
+                        dbg!("successfully acked", item.packet.get_seq());
+                        continue;
+                    }
+                    if item.latest_transmission_time.elapsed().unwrap()
+                        < Duration::from_secs(RETRANSMISSION_TIMEOUT) {
+                        dbg!("retransmit");
+                        socket.sender.send_to(item.packet.clone(), IpAddr::V4(socket.remote_addr()))
+                            .context("failed to retransmit")
+                            .unwrap();
+                        item.transmission_count += 1;
+                        item.latest_transmission_time = SystemTime::now();
+                        socket.retransmission_queue.push_back(item);
+                        break;
+                    } else {
+                        dbg!("reached MAX_TRANSMISSION");
+                    }
+                }
+            }
+            drop(table);
+            thread::sleep(Duration::from_millis(100));
+        }
     }
 
     pub fn connect(&self, addr: Ipv4Addr, port: u16) -> Result<AddressPair> {
@@ -434,6 +470,7 @@ impl TCP {
                 TcpStatus::Listen => self.listen_handler(table, addrs, &packet, remote_addr),
                 TcpStatus::SynRecv => self.synrecv_handler(table, addrs, &packet),
                 TcpStatus::SynSent => self.synsent_handler(socket, &packet),
+                TcpStatus::Established => self.established_handler(socket, &packet),
                 _ => {
                     dbg!("not implemented state");
                     Ok(())
@@ -442,6 +479,32 @@ impl TCP {
                 dbg!(error);
             }
         }
+    }
+
+    fn delete_acked_segement_from_retransmisson_queue(&self, socket: &mut Socket) {
+        dbg!("ack accept", socket.send_param.unacked_seq);
+        while let Some(item) = socket.retransmission_queue.pop_front() {
+            if socket.send_param.unacked_seq > item.packet.get_seq() {
+                dbg!("successfully acked", item.packet.get_seq());
+                self.publish_event(socket.addrs, TCPEventKind::Acked);
+            } else {
+                socket.retransmission_queue.push_front(item);
+                break;
+            }
+        }
+    }
+
+    fn established_handler(&self, socket: &mut Socket, packet: &TCPPacket) -> Result<()> {
+        dbg!("established handler");
+        if socket.send_param.unacked_seq < packet.get_ack()
+            && packet.get_ack() <= socket.send_param.next_seq
+        {
+            socket.send_param.unacked_seq = packet.get_ack();
+            self.delete_acked_segement_from_retransmisson_queue(socket);    
+        } else if socket.send_param.next_seq < packet.get_ack() {
+            return Ok(())
+        }
+        Ok(())
     }
 
     fn listen_handler(

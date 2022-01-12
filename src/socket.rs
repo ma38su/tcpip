@@ -1,9 +1,10 @@
 use std::collections::VecDeque;
+use std::time::SystemTime;
 use std::{ops::Range, net::{Ipv4Addr, IpAddr}};
 use anyhow::{Result,Context};
 use pnet::packet::{util, Packet};
 use pnet::{transport::{TransportSender, TransportChannelType, TransportProtocol, self}, packet::ip::IpNextHeaderProtocols};
-use crate::tcp::{TCPPacket, TcpStatus};
+use crate::tcp::{TCPPacket, TcpStatus, ACK};
 
 const SOCKET_BUFFER_SIZE: usize = 4380;
 pub const PORT_RANGE: Range<u16> = 40000..60000;
@@ -59,6 +60,7 @@ pub struct Socket {
     pub send_param: SendParam,
     pub recv_param: RecvParam,
     pub status: TcpStatus,
+    pub retransmission_queue: VecDeque<RetransmissionQueueEntry>,
     pub connected_queue: VecDeque<AddressPair>,
     pub listening_socket: Option<AddressPair>,
     pub sender: TransportSender,
@@ -86,6 +88,7 @@ impl Socket {
                 tail: 0,
             },
             status,
+            retransmission_queue: VecDeque::new(),
             connected_queue: VecDeque::new(),
             listening_socket: None,
             sender,
@@ -133,6 +136,30 @@ impl Socket {
         ).context(format!("failed to send: \n{:?}", tcp_packet))?;
 
         dbg!("sent", &self.status, &tcp_packet);
+        if payload.is_empty() && tcp_packet.get_flag() == ACK {
+            return Ok(sent_size);
+        }
+        self.retransmission_queue
+            .push_back(RetransmissionQueueEntry::new(tcp_packet));
+
         Ok(sent_size)
+    }
+}
+
+
+#[derive(Clone, Debug)]
+pub struct RetransmissionQueueEntry {
+    pub packet: TCPPacket,
+    pub latest_transmission_time: SystemTime,
+    pub transmission_count: u8,
+}
+
+impl RetransmissionQueueEntry {
+    fn new(packet: TCPPacket) -> Self {
+        Self {
+            packet,
+            latest_transmission_time: SystemTime::now(),
+            transmission_count: 1,
+        }
     }
 }

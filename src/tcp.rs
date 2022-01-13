@@ -17,10 +17,11 @@ use rand::prelude::ThreadRng;
 
 use crate::socket::{Socket, AddressPair, PORT_RANGE};
 
-const MSS: usize = 1460;
-const UNDETERMINED_ADDR: Ipv4Addr = Ipv4Addr::new(0,0,0,0);
+const UNDETERMINED_IP_ADDR: Ipv4Addr = Ipv4Addr::new(0,0,0,0);
 const UNDETERMINED_PORT: u16 = 0;
+const MAX_TRANSMISSION: u8 = 5;
 const RETRANSMISSION_TIMEOUT: u64 = 3;
+const MSS: usize = 1460;
 
 pub const TCP_HEADER_SIZE: usize = 20;
 
@@ -273,14 +274,19 @@ impl TCP {
             let mut table = self.sockets.write().unwrap();
             for (_, socket) in table.iter_mut() {
                 while let Some(mut item) = socket.retransmission_queue.pop_front() {
-                    if socket.send_param.unacked_seq >item.packet.get_seq() {
+                    if socket.send_param.unacked_seq > item.packet.get_seq() {
                         dbg!("successfully acked", item.packet.get_seq());
                         continue;
                     }
-                    if item.latest_transmission_time.elapsed().unwrap()
-                        < Duration::from_secs(RETRANSMISSION_TIMEOUT) {
+                    if item.latest_transmission_time.elapsed().unwrap() < Duration::from_secs(RETRANSMISSION_TIMEOUT) {
+                        socket.retransmission_queue.push_front(item);
+                        break;
+                    }
+                    if item.transmission_count < MAX_TRANSMISSION {
                         dbg!("retransmit");
-                        socket.sender.send_to(item.packet.clone(), IpAddr::V4(socket.remote_addr()))
+                        socket
+                            .sender
+                            .send_to(item.packet.clone(), IpAddr::V4(socket.remote_addr()))
                             .context("failed to retransmit")
                             .unwrap();
                         item.transmission_count += 1;
@@ -365,7 +371,7 @@ impl TCP {
         let addrs = AddressPair::new(
             local_addr,
             local_port,
-            UNDETERMINED_ADDR,
+            UNDETERMINED_IP_ADDR,
             UNDETERMINED_PORT,
         );
         let socket = Socket::new(
@@ -409,6 +415,28 @@ impl TCP {
         Ok(())
     }
 
+    pub fn recv(&self, addrs: AddressPair, buffer: &mut [u8]) -> Result<usize> {
+        let mut table = self.sockets.write().unwrap();
+        let mut socket = table.get_mut(&addrs)
+            .context(format!("no such socket: {:?}", addrs))?;
+        let mut received_size = socket.recv_buffer.len() - socket.recv_param.window_size as usize;
+        while received_size == 0 {
+            drop(table);
+            dbg!("waiting incoming data");
+            self.wait_event(addrs, TCPEventKind::DataArrived);
+            table = self.sockets.write().unwrap();
+            socket = table
+                .get_mut(&addrs)
+                .context(format!("no such socket: {:?}", addrs))?;
+            received_size = socket.recv_buffer.len() - socket.recv_param.window_size as usize;
+        }
+        let copy_size = cmp::min(buffer.len(), received_size);
+        buffer[..copy_size].copy_from_slice(&socket.recv_buffer[..copy_size]);
+        socket.recv_buffer.copy_within(copy_size.., 0);
+        socket.recv_param.window_size += copy_size as u16;
+        Ok(copy_size)
+    }
+
     pub fn receive_handler(&self) -> Result<()> {
         dbg!("begin recv thread");
         let (_, mut receiver) = transport::transport_channel(
@@ -448,7 +476,7 @@ impl TCP {
                     addrs = AddressPair::new(
                         local_addr,
                         packet.get_dst(),
-                        UNDETERMINED_ADDR,
+                        UNDETERMINED_IP_ADDR,
                         UNDETERMINED_PORT,
                     );
                     match table.get_mut(&addrs) {
@@ -483,12 +511,12 @@ impl TCP {
 
     fn delete_acked_segement_from_retransmisson_queue(&self, socket: &mut Socket) {
         dbg!("ack accept", socket.send_param.unacked_seq);
-        while let Some(item) = socket.retransmission_queue.pop_front() {
+        while let Some(item) = socket.retransmission_queue.front() {
             if socket.send_param.unacked_seq > item.packet.get_seq() {
                 dbg!("successfully acked", item.packet.get_seq());
                 self.publish_event(socket.addrs, TCPEventKind::Acked);
+                socket.retransmission_queue.pop_front();
             } else {
-                socket.retransmission_queue.push_front(item);
                 break;
             }
         }
@@ -504,6 +532,37 @@ impl TCP {
         } else if socket.send_param.next_seq < packet.get_ack() {
             return Ok(())
         }
+        if packet.get_flag() & ACK == 0 {
+            return Ok(());
+        }
+        if !packet.payload().is_empty() {
+            self.process_payload(socket, &packet)?;
+        }
+        Ok(())
+    }
+
+    fn process_payload(&self, socket: &mut Socket, packet: &TCPPacket) -> Result<()> {
+        let offset = socket.recv_buffer.len() - socket.recv_param.window_size as usize
+            + (packet.get_seq() - socket.recv_param.next_seq) as usize;
+        let copy_size = cmp::min(packet.payload().len(), socket.recv_buffer.len() - offset);
+        socket.recv_buffer[offset..offset+copy_size]
+            .copy_from_slice(&packet.payload()[..copy_size]);
+        socket.recv_param.tail = cmp::max(socket.recv_param.tail, packet.get_seq() + copy_size as u32);
+        if packet.get_seq() == socket.recv_param.next_seq {
+            socket.recv_param.next_seq = socket.recv_param.tail;
+            socket.recv_param.window_size -= (socket.recv_param.tail - packet.get_seq()) as u16;
+        }
+        if copy_size > 0 {
+            socket.send_tcp_packet(
+                socket.send_param.next_seq,
+                socket.recv_param.next_seq,
+                ACK,
+                &[],
+            )?;
+        } else {
+            dbg!("recv buffer overflow");
+        }
+        self.publish_event(socket.addrs, TCPEventKind::DataArrived);
         Ok(())
     }
 

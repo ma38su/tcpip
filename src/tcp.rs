@@ -238,6 +238,9 @@ impl TCP {
             )?;
             cursor += send_size;
             socket.send_param.next_seq += send_size as u32;
+            socket.send_param.window_size -= send_size as u16;
+            drop(table);
+            thread::sleep(Duration::from_millis(1));
         }
         Ok(())
     }

@@ -2,9 +2,11 @@ use std::collections::VecDeque;
 use std::time::SystemTime;
 use std::{ops::Range, net::{Ipv4Addr, IpAddr}};
 use anyhow::{Result,Context};
-use pnet::packet::{util, Packet};
+use pnet::packet::{util};
 use pnet::{transport::{TransportSender, TransportChannelType, TransportProtocol, self}, packet::ip::IpNextHeaderProtocols};
-use crate::tcp::{TCPPacket, TcpStatus, ACK};
+use pnet::packet::Packet;
+use crate::packet::TCPPacket;
+use crate::tcp::{TcpStatus, ACK};
 
 const SOCKET_BUFFER_SIZE: usize = 4380;
 pub const PORT_RANGE: Range<u16> = 40000..60000;

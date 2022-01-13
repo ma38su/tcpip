@@ -1,6 +1,8 @@
 mod socket;
 pub mod tcp;
 pub mod dns;
+ 
+pub mod packet;
 
 #[cfg(test)]
 mod tests {

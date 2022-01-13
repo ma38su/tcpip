@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0.52"
 clap = "3.0.1"
+ctrlc = "3.2.1"
 pnet = "0.28.0"
 rand = "0.8.4"
 url = "2.2.2"

@@ -167,3 +167,15 @@ fn flag_to_string(flag: u8) -> String {
 
     flags.join(" ")
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn flag_to_string_works() {
+        assert_eq!(flag_to_string(RST), "RST");
+        assert_eq!(flag_to_string(ACK | SYN), "SYN ACK");
+    }
+}

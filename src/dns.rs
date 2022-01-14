@@ -236,3 +236,25 @@ pub fn resolve(domain_name: &str, dns_server: &str) -> Result<Vec<String>> {
 
     Ok(ans)
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_works() {
+        let results = resolve("www.google.com", "8.8.8.8:53").unwrap();
+        let expected = "142.250.199.100";
+        assert!(contains(&results, expected));
+    }
+
+    fn contains(list: &Vec<String>, addr: &str) -> bool {
+        for v in list {
+            if v == addr {
+                return true;
+            }
+        }
+        false
+    }
+}

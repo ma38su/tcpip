@@ -92,6 +92,7 @@ pub struct TCP {
 impl TCP {
     pub fn new() -> Arc<Self> {
         let sockets = RwLock::new(HashMap::new());
+
         let tcp = Arc::new(Self {
             sockets,
             event_condvar: (Mutex::new(None), Condvar::new()),
@@ -101,6 +102,7 @@ impl TCP {
         std::thread::spawn(move || {
             cloned_tcp.receive_handler().unwrap();
         });
+
         let cloned_tcp = tcp.clone();
         std::thread::spawn(move || {
             cloned_tcp.timer();
@@ -111,6 +113,7 @@ impl TCP {
     fn timer(&self) {
         dbg!("begin timer thread");
         loop {
+            let retransmission_timeout = Duration::from_secs(RETRANSMISSION_TIMEOUT);
             let mut table = self.sockets.write().unwrap();
             for (addrs, socket) in table.iter_mut() {
                 while let Some(mut item) = socket.retransmission_queue.pop_front() {
@@ -125,7 +128,7 @@ impl TCP {
                         }
                         continue;
                     }
-                    if item.latest_transmission_time.elapsed().unwrap() < Duration::from_secs(RETRANSMISSION_TIMEOUT) {
+                    if item.latest_transmission_time.elapsed().unwrap() < retransmission_timeout {
                         socket.retransmission_queue.push_front(item);
                         break;
                     }
@@ -153,7 +156,7 @@ impl TCP {
                 }
             }
             drop(table);
-            thread::sleep(Duration::from_millis(100));
+            thread::sleep(Duration::from_millis(10));
         }
     }
 
@@ -306,7 +309,9 @@ impl TCP {
                 packet.get_src(),
             );
             let socket= match table.get_mut(&addrs) {
+                // client socket
                 Some(socket) => socket,
+                // server socket
                 None => {
                     addrs = AddressPair::new(
                         local_addr,
@@ -331,6 +336,7 @@ impl TCP {
             if let Err(error) = match socket.status {
                 TcpStatus::Listen => self.listen_handler(table, addrs, &packet, remote_addr),
                 TcpStatus::SynRecv => self.synrecv_handler(table, addrs, &packet),
+                // connect called, SYN sent.
                 TcpStatus::SynSent => self.synsent_handler(socket, &packet),
                 TcpStatus::Established => self.established_handler(socket, &packet),
                 TcpStatus::CloseWait | TcpStatus::LastAck => self.close_handler(socket, &packet),
@@ -488,10 +494,10 @@ impl TCP {
 
     fn synsent_handler(&self, socket: &mut Socket, packet: &TCPPacket) -> Result<()> {
         dbg!("synsent handler");
-        if (packet.get_flag() & ACK) == ACK
+        let expected_flag = ACK | SYN;
+        if (packet.get_flag() & expected_flag) == expected_flag
                 && socket.send_param.unacked_seq <= packet.get_ack()
-                && packet.get_ack() <= socket.send_param.next_seq
-                && (packet.get_flag() & SYN) == SYN {
+                && packet.get_ack() <= socket.send_param.next_seq {
 
             socket.recv_param.next_seq = packet.get_seq() + 1;
             socket.recv_param.initial_seq = packet.get_seq();
@@ -508,7 +514,7 @@ impl TCP {
                 dbg!("status: synsent ->", &socket.status);
                 self.publish_event(socket.addrs, TCPEventKind::ConnectionCompleted);
             } else {
-                socket.status = TcpStatus::SynSent;
+                socket.status = TcpStatus::SynRecv;
                 socket.send_tcp_packet(
                     socket.send_param.next_seq,
                     socket.recv_param.next_seq,
